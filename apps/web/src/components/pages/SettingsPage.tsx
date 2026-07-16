@@ -149,7 +149,7 @@ export function SettingsPage() {
 
   if (loading) {
     return (
-      <div className="p-8 max-w-4xl mx-auto">
+      <div className="page-shell max-w-5xl">
         <div className="animate-pulse space-y-6">
           <div className="h-8 w-48 bg-gray-200 rounded" />
           <div className="h-40 bg-gray-100 rounded-xl" />
@@ -160,7 +160,7 @@ export function SettingsPage() {
   }
 
   return (
-    <div className="p-8 max-w-4xl mx-auto">
+    <div className="page-shell max-w-5xl">
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-gray-900">Settings</h1>
         <p className="text-gray-500 mt-1">Configure your AI Sales OS</p>
@@ -237,7 +237,7 @@ export function SettingsPage() {
             const isConnected = !!connector;
             const bs = getBrowserState(p.id);
             return (
-              <div key={p.id} className="flex items-center justify-between p-4 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors">
+              <div key={p.id} className="flex flex-col gap-4 rounded-xl border border-gray-100 p-4 transition-colors hover:border-gray-200 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-4">
                   <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ backgroundColor: p.color }}>
                     <p.icon className="text-white" size={20} />

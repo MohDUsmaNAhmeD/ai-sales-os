@@ -132,8 +132,8 @@ export function InboxPage() {
   };
 
   return (
-    <div className="flex h-full">
-      <div className="w-80 flex flex-col border-r border-gray-200">
+    <div className="flex h-full min-h-[600px] flex-col md:flex-row">
+      <div className={cn("w-full flex-col border-r border-gray-200 md:w-80", selectedConversation ? "hidden md:flex" : "flex")}>
         <div className="border-b border-gray-200 p-4">
           <div className="flex items-center justify-between mb-3">
             <h1 className="text-xl font-bold text-gray-900">Inbox</h1>
@@ -306,6 +306,7 @@ export function InboxPage() {
           <>
             <div className="flex items-center justify-between border-b border-gray-200 p-4">
               <div className="flex items-center gap-3">
+                <button onClick={() => setSelectedConversation(null)} className="rounded-lg border p-2 md:hidden" aria-label="Back to conversations">←</button>
                 <div
                   className="flex h-10 w-10 items-center justify-center rounded-full text-white text-sm font-medium"
                   style={{ backgroundColor: getPlatformColor(selectedConversation.platform) }}

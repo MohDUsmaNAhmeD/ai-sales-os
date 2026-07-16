@@ -116,13 +116,13 @@ async function summarizeConversation(conversationId: string) {
 
   const summary = {
     totalMessages: messages.length,
-    agentMessages: messages.filter((m) => m.senderType === "AGENT").length,
-    contactMessages: messages.filter((m) => m.senderType === "CONTACT").length,
+    agentMessages: messages.filter((m: { senderType: string; content: string }) => m.senderType === "AGENT").length,
+    contactMessages: messages.filter((m: { senderType: string; content: string }) => m.senderType === "CONTACT").length,
     dateRange: {
       start: messages[0].sentAt,
       end: messages[messages.length - 1].sentAt,
     },
-    recentTopics: messages.slice(-5).map((m) => m.content.slice(0, 100)),
+    recentTopics: messages.slice(-5).map((m: { senderType: string; content: string }) => m.content.slice(0, 100)),
   };
 
   await prisma.activity.create({
@@ -146,20 +146,20 @@ async function detectIntent(conversationId: string) {
   if (messages.length === 0) return;
 
   const contactMessages = messages
-    .filter((m) => m.senderType === "CONTACT")
-    .map((m) => m.content.toLowerCase());
+    .filter((m: { senderType: string; content: string }) => m.senderType === "CONTACT")
+    .map((m: { senderType: string; content: string }) => m.content.toLowerCase());
 
   const intent = {
-    interested: contactMessages.some((m) =>
+    interested: contactMessages.some((m: string) =>
       m.includes("interested") || m.includes("tell me more") || m.includes("sounds good")
     ),
-    pricing: contactMessages.some((m) =>
+    pricing: contactMessages.some((m: string) =>
       m.includes("price") || m.includes("cost") || m.includes("how much")
     ),
-    timeline: contactMessages.some((m) =>
+    timeline: contactMessages.some((m: string) =>
       m.includes("when") || m.includes("timeline") || m.includes("deadline")
     ),
-    objection: contactMessages.some((m) =>
+    objection: contactMessages.some((m: string) =>
       m.includes("but") || m.includes("concern") || m.includes("worried")
     ),
   };

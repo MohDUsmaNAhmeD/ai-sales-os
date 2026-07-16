@@ -88,7 +88,7 @@ export function CrmPage() {
             ))}
           </div>
         ) : (
-          <div className="grid grid-cols-5 gap-4 h-full">
+          <div className="grid min-w-[1100px] grid-cols-6 gap-4 h-full">
             {STAGES.map((stage) => {
               const stageDeals = deals.filter((d) => d.stage === stage.key);
               return (

@@ -126,8 +126,8 @@ export function LeadsPage() {
   };
 
   return (
-    <div className="flex h-full">
-      <div className="flex-1 flex flex-col border-r border-gray-200">
+    <div className="flex h-full min-h-[600px] flex-col xl:flex-row">
+      <div className={cn("flex-1 flex-col border-r border-gray-200", selectedLead ? "hidden xl:flex" : "flex")}>
         <div className="border-b border-gray-200 p-4">
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -277,7 +277,7 @@ export function LeadsPage() {
       </div>
 
       {selectedLead && (
-        <div className="w-[480px] flex flex-col bg-white">
+        <div className="flex w-full flex-col bg-white xl:w-[480px]">
           <div className="flex items-center justify-between border-b border-gray-200 p-4">
             <h2 className="font-semibold text-gray-900">Lead Details</h2>
             <button onClick={() => setSelectedLead(null)} className="rounded p-1 hover:bg-gray-100">

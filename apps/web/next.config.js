@@ -1,6 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   transpilePackages: ["@ai-sales-os/shared", "@ai-sales-os/db"],
+  serverExternalPackages: ["camoufox-js", "impit", "impit-linux-x64-gnu"],
   experimental: {
     serverActions: {
       bodySizeLimit: "10mb",

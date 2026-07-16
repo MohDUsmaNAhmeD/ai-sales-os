@@ -142,7 +142,7 @@ export function BrowsersPage() {
   };
 
   return (
-    <div className="p-8">
+    <div className="page-shell">
       {/* LinkedIn Quick Login */}
       <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-2xl p-6 mb-6 text-white shadow-lg">
         <div className="flex items-center gap-4">
