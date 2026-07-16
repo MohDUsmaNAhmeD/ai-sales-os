@@ -1,0 +1,503 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Auth & Users ───────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String
+  avatarUrl    String?
+  role         UserRole @default(MEMBER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  ownedLeads      Lead[]           @relation("OwnedLeads")
+  createdLeads    Lead[]           @relation("CreatedLeads")
+  conversations   Conversation[]
+  assignedConversations ConversationAssignee[]
+  activities      Activity[]
+  browserProfiles BrowserProfile[]
+  apiKeys         ApiKey[]
+  settings        UserSettings?
+
+  @@map("users")
+}
+
+enum UserRole {
+  ADMIN
+  MEMBER
+}
+
+model UserSettings {
+  id            String  @id @default(cuid())
+  userId        String  @unique
+  user          User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mistralKey    String?
+  defaultModel  String  @default("mistral-large-latest")
+  timezone      String  @default("UTC")
+  notifications String  @default("{}")
+
+  @@map("user_settings")
+}
+
+model ApiKey {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  key       String    @unique
+  lastUsed  DateTime?
+  createdAt DateTime  @default(now())
+
+  @@map("api_keys")
+}
+
+// ─── CRM & Leads ───────────────────────────────────────────
+
+model Lead {
+  id            String     @id @default(cuid())
+  externalId    String?
+  platform      Platform
+  status        LeadStatus @default(NEW)
+  score         Int        @default(0)
+  firstName     String?
+  lastName      String?
+  email         String?
+  phone         String?
+  company       String?
+  jobTitle      String?
+  profileUrl    String?
+  avatarUrl     String?
+  bio           String?
+  location      String?
+  tags          String     @default("[]")
+  customFields  String @default("{}")
+  aiSummary     String?
+  aiScoreReason String?
+  source        String?
+  ownerId       String?
+  owner         User?      @relation("OwnedLeads", fields: [ownerId], references: [id])
+  createdBy     String?
+  createdByUser User?      @relation("CreatedLeads", fields: [createdBy], references: [id])
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  conversations    Conversation[]
+  activities       Activity[]
+  deal             Deal?
+  contact          Contact?
+  outreachCampaign OutreachLead[]
+
+  @@unique([platform, externalId])
+  @@index([platform, status])
+  @@index([score])
+  @@index([ownerId])
+  @@map("leads")
+}
+
+enum Platform {
+  LINKEDIN
+  FACEBOOK
+  TWITTER
+  THREADS
+  PEOPLEPERHOUR
+  EMAIL
+  WEBSITE
+  MANUAL
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  PROPOSED
+  NEGOTIATION
+  WON
+  LOST
+  ARCHIVED
+}
+
+model Contact {
+  id        String   @id @default(cuid())
+  leadId    String   @unique
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  userId    String
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deals      Deal[]
+  activities Activity[]
+
+  @@map("contacts")
+}
+
+model Deal {
+  id          String    @id @default(cuid())
+  contactId   String?
+  contact     Contact?  @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  leadId      String?    @unique
+  lead        Lead?      @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  title       String
+  value       Float     @default(0)
+  currency    String    @default("USD")
+  stage       DealStage @default(QUALIFICATION)
+  probability Int       @default(0)
+  closeDate   DateTime?
+  notes       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  activities Activity[]
+
+  @@index([stage])
+  @@map("deals")
+}
+
+enum DealStage {
+  QUALIFICATION
+  NEEDS_ANALYSIS
+  PROPOSAL
+  NEGOTIATION
+  CLOSED_WON
+  CLOSED_LOST
+}
+
+// ─── Conversations & Messaging ──────────────────────────────
+
+model Conversation {
+  id                 String             @id @default(cuid())
+  externalId         String?
+  platform           Platform
+  subject            String?
+  status             ConversationStatus @default(OPEN)
+  priority           Priority           @default(NORMAL)
+  lastMessageAt      DateTime?
+  lastMessagePreview String?
+  unreadCount        Int                @default(0)
+  isBotActive        Boolean            @default(false)
+  leadId             String?
+  lead               Lead?              @relation(fields: [leadId], references: [id])
+  inboxId            String?
+  tags               String     @default("[]")
+  metadata           String @default("{}")
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  messages     Message[]
+  assignees    ConversationAssignee[]
+  participants ConversationParticipant[]
+  user         User?                     @relation(fields: [userId], references: [id])
+  userId       String?
+
+  @@index([platform, status])
+  @@index([lastMessageAt])
+  @@map("conversations")
+}
+
+enum ConversationStatus {
+  OPEN
+  PENDING
+  RESOLVED
+  CLOSED
+  SPAM
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  externalId     String?
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderType     SenderType
+  senderId       String?
+  content        String
+  contentType    ContentType  @default(TEXT)
+  attachments    String @default("[]")
+  metadata       String @default("{}")
+  isDraft        Boolean      @default(false)
+  isAiGenerated  Boolean      @default(false)
+  sentAt         DateTime     @default(now())
+  readAt         DateTime?
+
+  @@index([conversationId, sentAt])
+  @@map("messages")
+}
+
+enum SenderType {
+  AGENT
+  CONTACT
+  BOT
+  SYSTEM
+}
+
+enum ContentType {
+  TEXT
+  HTML
+  IMAGE
+  FILE
+  AUDIO
+  VIDEO
+  CARD
+  QUICK_REPLY
+  ACTION
+}
+
+model ConversationAssignee {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignedAt     DateTime     @default(now())
+
+  @@unique([conversationId, userId])
+  @@map("conversation_assignees")
+}
+
+model ConversationParticipant {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  platformUserId String
+  name           String?
+  avatarUrl      String?
+  role           String?
+  joinedAt       DateTime     @default(now())
+
+  @@map("conversation_participants")
+}
+
+// ─── Activities & Notes ─────────────────────────────────────
+
+model Activity {
+  id             String       @id @default(cuid())
+  type           ActivityType
+  title          String
+  description    String?
+  leadId         String?
+  lead           Lead?        @relation(fields: [leadId], references: [id])
+  contactId      String?
+  contact        Contact?     @relation(fields: [contactId], references: [id])
+  dealId         String?
+  deal           Deal?        @relation(fields: [dealId], references: [id])
+  userId         String?
+  user           User?        @relation(fields: [userId], references: [id])
+  conversationId String?
+  metadata       String @default("{}")
+  createdAt      DateTime     @default(now())
+
+  @@index([leadId, createdAt])
+  @@index([createdAt])
+  @@map("activities")
+}
+
+enum ActivityType {
+  NOTE
+  EMAIL
+  CALL
+  MEETING
+  TASK
+  STATUS_CHANGE
+  SCORE_CHANGE
+  OUTREACH
+  REPLY
+  FOLLOW_UP
+  AI_ACTION
+}
+
+// ─── Outreach Campaigns ─────────────────────────────────────
+
+model OutreachCampaign {
+  id          String         @id @default(cuid())
+  name        String
+  template    String
+  platform    Platform?
+  status      CampaignStatus @default(DRAFT)
+  createdBy   String
+  scheduledAt DateTime?
+  sentAt      DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  leads OutreachLead[]
+
+  @@map("outreach_campaigns")
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  PAUSED
+  COMPLETED
+}
+
+model OutreachLead {
+  id         String           @id @default(cuid())
+  campaignId String
+  campaign   OutreachCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  leadId     String
+  lead       Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  status     OutreachStatus   @default(PENDING)
+  sentAt     DateTime?
+  openedAt   DateTime?
+  repliedAt  DateTime?
+  createdAt  DateTime         @default(now())
+
+  @@unique([campaignId, leadId])
+  @@map("outreach_leads")
+}
+
+enum OutreachStatus {
+  PENDING
+  SENT
+  DELIVERED
+  OPENED
+  REPLIED
+  BOUNCED
+  FAILED
+}
+
+// ─── Browser Profiles ───────────────────────────────────────
+
+model BrowserProfile {
+  id              String        @id @default(cuid())
+  name            String
+  platform        Platform
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  profilePath     String
+  proxyUrl        String?
+  proxyUsername   String?
+  proxyPassword   String?
+  status          ProfileStatus @default(ACTIVE)
+  lastHealthCheck DateTime?
+  lastActiveAt    DateTime?
+  crashCount      Int           @default(0)
+  metadata        String @default("{}")
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@map("browser_profiles")
+}
+
+enum ProfileStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+  CREATING
+  RESETTING
+}
+
+// ─── Background Jobs ────────────────────────────────────────
+
+model BackgroundJob {
+  id          String    @id @default(cuid())
+  type        String
+  status      JobStatus @default(PENDING)
+  payload     String @default("{}")
+  result      String?
+  error       String?
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3)
+  priority    Int       @default(0)
+  runAt       DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([status, type, runAt])
+  @@map("background_jobs")
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  RETRYING
+  CANCELLED
+}
+
+// ─── Sync & Connectors ──────────────────────────────────────
+
+model ConnectorState {
+  id           String    @id @default(cuid())
+  platform     Platform
+  userId       String
+  accessToken  String?
+  refreshToken String?
+  expiresAt    DateTime?
+  scope        String?
+  metadata     String @default("{}")
+  lastSyncAt   DateTime?
+  syncStatus   String    @default("idle")
+  errorCount   Int       @default(0)
+  lastError    String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([platform, userId])
+  @@map("connector_states")
+}
+
+// ─── Analytics ──────────────────────────────────────────────
+
+model AnalyticsEvent {
+  id         String   @id @default(cuid())
+  event      String
+  properties String @default("{}")
+  userId     String?
+  sessionId  String?
+  createdAt  DateTime @default(now())
+
+  @@index([event, createdAt])
+  @@index([userId, createdAt])
+  @@map("analytics_events")
+}
+
+model MetricSnapshot {
+  id         String   @id @default(cuid())
+  metric     String
+  value      Float
+  dimensions String @default("{}")
+  recordedAt DateTime @default(now())
+
+  @@index([metric, recordedAt])
+  @@map("metric_snapshots")
+}
+
+// ─── Monitoring ─────────────────────────────────────────────
+
+model SystemHealth {
+  id             String   @id @default(cuid())
+  component      String
+  status         String
+  cpuUsage       Float?
+  memoryUsage    Float?
+  activeJobs     Int?
+  queueDepth     Int?
+  errorRate      Float?
+  responseTimeMs Float?
+  metadata       String @default("{}")
+  checkedAt      DateTime @default(now())
+
+  @@index([component, checkedAt])
+  @@map("system_health")
+}

@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "AI Sales OS - Cookie Grabber",
+  "version": "1.0",
+  "description": "One-click cookie export to AI Sales OS",
+  "permissions": ["cookies", "activeTab", "storage", "tabs"],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "*://*.linkedin.com/*",
+    "*://*.facebook.com/*",
+    "*://*.twitter.com/*",
+    "*://*.x.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Export cookies to AI Sales OS"
+  }
+}
