@@ -1,5 +1,6 @@
 export * from "./types";
-export { CamoufoxManager, camoufox } from "./browser";
+export { CamoufoxManager, camoufox, SUPPORTED_PLATFORMS } from "./camoufox";
+export type { BrowserPlatform, BrowserHealth, CamoufoxConfig } from "./camoufox";
 export type { BrowserProfile, ScrapedProfile, ScrapedMessage } from "./browser";
 export {
   scrape,

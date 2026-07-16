@@ -1,125 +1,113 @@
 import { NextRequest, NextResponse } from "next/server";
-import { handleApiError } from "@/lib/api";
 import { prisma } from "@ai-sales-os/db";
 import { scrape, type ScrapedProfile } from "@ai-sales-os/shared";
 
+const SUPPORTED = ["LINKEDIN", "FACEBOOK", "TWITTER", "PEOPLEPERHOUR"] as const;
+type Platform = (typeof SUPPORTED)[number];
+
 export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { query, platform } = body;
-
-    if (!query) {
-      return NextResponse.json({ error: "Query is required" }, { status: 400 });
-    }
-
-    if (!platform) {
-      return NextResponse.json({ error: "Platform is required" }, { status: 400 });
-    }
-
-    console.log(`[Discovery] Searching ${platform} for: ${query}`);
-
-    // Get cookies for this platform if available
-    const connector = await prisma.connectorState.findUnique({
-      where: { platform_userId: { platform: platform as never, userId: "default" } },
-    });
-
-    const cookies = connector?.accessToken || undefined;
-
-    // Run real scraper
-    let scrapedLeads: ScrapedProfile[];
-    try {
-      scrapedLeads = await scrape(platform, query, cookies);
-    } catch (scrapeError) {
-      console.error(`[Discovery] Scrape failed for ${platform}:`, scrapeError);
-      // If scrape fails, return error rather than fake data
-      return NextResponse.json(
-        {
-          error: `Failed to scrape ${platform}. Make sure you have browser cookies configured for this platform.`,
-          details: scrapeError instanceof Error ? scrapeError.message : "Unknown error",
-        },
-        { status: 502 }
-      );
-    }
-
-    if (scrapedLeads.length === 0) {
-      return NextResponse.json({
-        success: true,
-        leadsFound: 0,
-        message: `No results found for "${query}" on ${platform}. Try different search terms or check your browser cookies.`,
-        query,
-        platform,
-      });
-    }
-
-    // Store scraped leads in database
-    const createdLeads = [];
-    for (const scraped of scrapedLeads) {
-      // Skip leads without external IDs
-      if (!scraped.externalId) continue;
-
-      // Check for duplicate
-      const existing = await prisma.lead.findFirst({
-        where: {
-          platform: platform as never,
-          externalId: scraped.externalId,
-        },
-      });
-
-      if (existing) continue;
-
-      const lead = await prisma.lead.create({
-        data: {
-          platform: platform as never,
-          externalId: scraped.externalId,
-          firstName: scraped.firstName,
-          lastName: scraped.lastName,
-          email: scraped.email || null,
-          company: scraped.company || null,
-          jobTitle: scraped.jobTitle || null,
-          profileUrl: scraped.profileUrl,
-          avatarUrl: scraped.avatarUrl || null,
-          bio: scraped.bio || null,
-          location: scraped.location || null,
-          source: `search:${query}`,
-          tags: JSON.stringify([query.toLowerCase(), platform.toLowerCase()]),
-          score: calculateInitialScore(scraped),
-        },
-      });
-
-      createdLeads.push(lead);
-    }
-
-    // Log the activity
-    await prisma.analyticsEvent.create({
-      data: {
-        event: "lead_discovery",
-        properties: JSON.stringify({
-          platform,
-          query,
-          resultsFound: scrapedLeads.length,
-          leadsCreated: createdLeads.length,
-        }),
-      },
-    });
-
-    return NextResponse.json({
-      success: true,
-      leadsFound: createdLeads.length,
-      totalResults: scrapedLeads.length,
-      query,
-      platform,
-    });
-  } catch (error) {
-    return NextResponse.json(await handleApiError(error), { status: 500 });
+  const body = await request.json().catch(() => ({}));
+  const query = typeof body.query === "string" ? body.query.trim() : "";
+  if (query.length < 2 || query.length > 160) {
+    return NextResponse.json({ error: "Enter a search query between 2 and 160 characters." }, { status: 400 });
   }
+
+  const requested: string[] = Array.isArray(body.platforms)
+    ? body.platforms
+    : body.platform
+      ? [body.platform]
+      : [...SUPPORTED];
+  const platforms = [...new Set(requested.map((value) => String(value).toUpperCase()))].filter(
+    (value): value is Platform => SUPPORTED.includes(value as Platform),
+  );
+  if (!platforms.length) {
+    return NextResponse.json({ error: "Select at least one supported platform." }, { status: 400 });
+  }
+
+  const connectors = await prisma.connectorState.findMany({
+    where: { platform: { in: platforms as never } },
+  });
+  const byPlatform = new Map(connectors.map((connector: { platform: string; accessToken: string | null }) => [connector.platform, connector]));
+
+  const settled = await Promise.allSettled(
+    platforms.map(async (platform) => {
+      const connector = byPlatform.get(platform);
+      const profiles = await scrape(platform, query, connector?.accessToken || undefined);
+      const leads = await Promise.all(profiles.filter((profile) => profile.externalId).map((profile) => saveLead(platform, query, profile)));
+      return { platform, results: profiles.length, saved: leads.length, leads };
+    }),
+  );
+
+  const results = settled.map((result, index) =>
+    result.status === "fulfilled"
+      ? result.value
+      : {
+          platform: platforms[index],
+          results: 0,
+          saved: 0,
+          leads: [],
+          error: result.reason instanceof Error ? result.reason.message : "Platform search failed",
+        },
+  );
+
+  await prisma.analyticsEvent.create({
+    data: {
+      event: "lead_discovery",
+      properties: JSON.stringify({
+        query,
+        platforms,
+        resultsFound: results.reduce((sum, result) => sum + result.results, 0),
+        leadsSaved: results.reduce((sum, result) => sum + result.saved, 0),
+      }),
+    },
+  });
+
+  return NextResponse.json({
+    success: results.some((result) => !("error" in result)),
+    query,
+    results,
+    totalResults: results.reduce((sum, result) => sum + result.results, 0),
+    leadsSaved: results.reduce((sum, result) => sum + result.saved, 0),
+  });
 }
 
-function calculateInitialScore(profile: ScrapedProfile): number {
-  let score = 10; // base score for being found
-  if (profile.email) score += 15;
-  if (profile.company) score += 15;
-  if (profile.jobTitle) score += 10;
-  if (profile.bio && profile.bio.length > 20) score += 10;
-  if (profile.location) score += 5;
-  return Math.min(100, score);
+async function saveLead(platform: Platform, query: string, profile: ScrapedProfile) {
+  return prisma.lead.upsert({
+    where: { platform_externalId: { platform, externalId: profile.externalId } },
+    update: {
+      firstName: profile.firstName,
+      lastName: profile.lastName,
+      email: profile.email || null,
+      company: profile.company || null,
+      jobTitle: profile.jobTitle || null,
+      profileUrl: profile.profileUrl,
+      avatarUrl: profile.avatarUrl || null,
+      bio: profile.bio || null,
+      location: profile.location || null,
+    },
+    create: {
+      platform,
+      externalId: profile.externalId,
+      firstName: profile.firstName,
+      lastName: profile.lastName,
+      email: profile.email || null,
+      company: profile.company || null,
+      jobTitle: profile.jobTitle || null,
+      profileUrl: profile.profileUrl,
+      avatarUrl: profile.avatarUrl || null,
+      bio: profile.bio || null,
+      location: profile.location || null,
+      source: `search:${query}`,
+      tags: JSON.stringify([query.toLowerCase(), platform.toLowerCase()]),
+      score: initialScore(profile),
+    },
+  });
+}
+
+function initialScore(profile: ScrapedProfile) {
+  return Math.min(
+    100,
+    10 + (profile.email ? 15 : 0) + (profile.company ? 15 : 0) + (profile.jobTitle ? 10 : 0) +
+      (profile.bio && profile.bio.length > 20 ? 10 : 0) + (profile.location ? 5 : 0),
+  );
 }

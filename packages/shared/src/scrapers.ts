@@ -1,4 +1,5 @@
 import { ScrapedProfile, ScrapedMessage } from "./browser";
+import { camoufox, type BrowserPlatform } from "./camoufox";
 
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -10,32 +11,27 @@ function randomUA(): string {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
-// ─── CDP Helpers ─────────────────────────────────────────────
+// ─── Camoufox + Playwright helpers ───────────────────────────
 
-async function connectCDP(): Promise<{ browser: any; puppeteer: typeof import("puppeteer-core") }> {
-  const puppeteer = await import("puppeteer-core");
-  let versionInfo;
-  try {
-    const versionRes = await fetch("http://127.0.0.1:9222/json/version");
-    if (!versionRes.ok) throw new Error("CDP not available");
-    versionInfo = await versionRes.json();
-  } catch {
-    throw new Error("Browser not running. Click 'Browser Login' in Settings first.");
-  }
-  const browser = await puppeteer.connect({
-    browserWSEndpoint: versionInfo.webSocketDebuggerUrl,
-    defaultViewport: null,
-  });
-  return { browser, puppeteer };
+async function connectBrowser(platform: BrowserPlatform): Promise<{ browser: any }> {
+  const context = await camoufox.getContext(platform);
+  return {
+    browser: {
+      pages: () => context.pages(),
+      newPage: () => context.newPage(),
+      disconnect: () => undefined,
+    },
+  };
+}
+
+async function isBrowserAvailable(platform: BrowserPlatform): Promise<boolean> {
+  return (await camoufox.healthCheck(platform)).running;
 }
 
 async function isCDPAvailable(): Promise<boolean> {
-  try {
-    const res = await fetch("http://127.0.0.1:9222/json/version");
-    return res.ok;
-  } catch {
-    return false;
-  }
+  const platforms: BrowserPlatform[] = ["LINKEDIN", "FACEBOOK", "TWITTER", "PEOPLEPERHOUR"];
+  const health = await Promise.all(platforms.map((platform) => camoufox.healthCheck(platform)));
+  return health.some(({ running }) => running);
 }
 
 // ─── LinkedIn ───────────────────────────────────────────────
@@ -54,7 +50,7 @@ export async function scrapeLinkedInSearch(
 }
 
 async function scrapeLinkedInSearchViaCDP(query: string): Promise<ScrapedProfile[]> {
-  const { browser } = await connectCDP();
+  const { browser } = await connectBrowser("LINKEDIN");
 
   let page;
   let isNewPage = false;
@@ -179,7 +175,7 @@ export async function scrapeLinkedInMessages(
 }
 
 async function scrapeLinkedInMessagesViaCDP(): Promise<{ conversationId: string; messages: ScrapedMessage[] }[]> {
-  const { browser } = await connectCDP();
+  const { browser } = await connectBrowser("LINKEDIN");
 
   try {
     // Find existing LinkedIn tab or create new one
@@ -190,7 +186,7 @@ async function scrapeLinkedInMessagesViaCDP(): Promise<{ conversationId: string;
     }
 
     await page.goto("https://www.linkedin.com/messaging/", {
-      waitUntil: "networkidle2",
+      waitUntil: "networkidle",
       timeout: 30000,
     });
 
@@ -262,7 +258,7 @@ async function scrapeLinkedInMessagesViaCDP(): Promise<{ conversationId: string;
 
       try {
         const fullUrl = conv.href.startsWith("http") ? conv.href : `https://www.linkedin.com${conv.href}`;
-        await page.goto(fullUrl, { waitUntil: "networkidle2", timeout: 15000 });
+        await page.goto(fullUrl, { waitUntil: "networkidle", timeout: 15000 });
 
         await page.waitForSelector('.msg-s-event-list, [data-testid="message-event-list"], .msg-list__livetext', {
           timeout: 8000,
@@ -429,11 +425,11 @@ export async function sendLinkedInMessageViaCDP(
   conversationId: string,
   content: string
 ): Promise<boolean> {
-  if (!(await isCDPAvailable())) {
-    throw new Error("Browser not running. Launch browser and log in first.");
+  if (!(await isBrowserAvailable("LINKEDIN"))) {
+    throw new Error("LinkedIn browser not running. Launch it and sign in first.");
   }
 
-  const { browser } = await connectCDP();
+  const { browser } = await connectBrowser("LINKEDIN");
   let page;
   let isNewPage = false;
 
@@ -448,7 +444,7 @@ export async function sendLinkedInMessageViaCDP(
     }
 
     await page.goto(`https://www.linkedin.com/messaging/thread/${conversationId}`, {
-      waitUntil: "networkidle2",
+      waitUntil: "networkidle",
       timeout: 20000,
     });
 
@@ -515,7 +511,7 @@ export async function scrapeFacebookGroup(
 }
 
 async function scrapeFacebookGroupViaCDP(groupUrl: string): Promise<ScrapedProfile[]> {
-  const { browser } = await connectCDP();
+  const { browser } = await connectBrowser("FACEBOOK");
 
   let page;
   let isNewPage = false;
@@ -642,7 +638,7 @@ export async function scrapeFacebookMessages(
 }
 
 async function scrapeFacebookMessagesViaCDP(): Promise<{ conversationId: string; messages: ScrapedMessage[] }[]> {
-  const { browser } = await connectCDP();
+  const { browser } = await connectBrowser("FACEBOOK");
 
   try {
     // Find existing Facebook tab or create new one
@@ -934,11 +930,11 @@ export async function sendFacebookMessageViaCDP(
   conversationId: string,
   content: string
 ): Promise<boolean> {
-  if (!(await isCDPAvailable())) {
-    throw new Error("Browser not running. Launch browser and log in first.");
+  if (!(await isBrowserAvailable("FACEBOOK"))) {
+    throw new Error("Facebook browser not running. Launch it and sign in first.");
   }
 
-  const { browser } = await connectCDP();
+  const { browser } = await connectBrowser("FACEBOOK");
   let page;
   let isNewPage = false;
 
@@ -953,7 +949,7 @@ export async function sendFacebookMessageViaCDP(
     }
 
     await page.goto(`https://www.facebook.com/messages/t/${conversationId}`, {
-      waitUntil: "networkidle2",
+      waitUntil: "networkidle",
       timeout: 20000,
     });
 
@@ -1026,7 +1022,7 @@ export async function scrapeTwitterSearch(
 }
 
 async function scrapeTwitterSearchViaCDP(query: string): Promise<ScrapedProfile[]> {
-  const { browser } = await connectCDP();
+  const { browser } = await connectBrowser("TWITTER");
 
   let page;
   let isNewPage = false;
@@ -1170,7 +1166,7 @@ export async function scrapeTwitterMessages(
 }
 
 async function scrapeTwitterMessagesViaCDP(): Promise<{ conversationId: string; messages: ScrapedMessage[] }[]> {
-  const { browser } = await connectCDP();
+  const { browser } = await connectBrowser("TWITTER");
 
   try {
     // Find existing X/Twitter tab or create new one
@@ -1181,7 +1177,7 @@ async function scrapeTwitterMessagesViaCDP(): Promise<{ conversationId: string; 
     }
 
     await page.goto("https://x.com/messages", {
-      waitUntil: "networkidle2",
+      waitUntil: "networkidle",
       timeout: 30000,
     });
 
@@ -1255,7 +1251,7 @@ async function scrapeTwitterMessagesViaCDP(): Promise<{ conversationId: string; 
 
       try {
         const fullUrl = conv.href.startsWith("http") ? conv.href : `https://x.com${conv.href}`;
-        await page.goto(fullUrl, { waitUntil: "networkidle2", timeout: 15000 });
+        await page.goto(fullUrl, { waitUntil: "networkidle", timeout: 15000 });
 
         await page.waitForSelector('[data-testid="messageEntry"], [data-testid="message-text"]', {
           timeout: 8000,
@@ -1342,11 +1338,11 @@ export async function sendTwitterMessageViaCDP(
   conversationId: string,
   content: string
 ): Promise<boolean> {
-  if (!(await isCDPAvailable())) {
-    throw new Error("Browser not running. Launch browser and log in first.");
+  if (!(await isBrowserAvailable("TWITTER"))) {
+    throw new Error("Twitter browser not running. Launch it and sign in first.");
   }
 
-  const { browser } = await connectCDP();
+  const { browser } = await connectBrowser("TWITTER");
   let page;
   let isNewPage = false;
 
@@ -1361,7 +1357,7 @@ export async function sendTwitterMessageViaCDP(
     }
 
     await page.goto(`https://x.com/messages/${conversationId}`, {
-      waitUntil: "networkidle2",
+      waitUntil: "networkidle",
       timeout: 20000,
     });
 
@@ -1483,7 +1479,7 @@ export async function scrapePeoplePerHour(
 }
 
 async function scrapePeoplePerHourViaCDP(query: string): Promise<ScrapedProfile[]> {
-  const { browser } = await connectCDP();
+  const { browser } = await connectBrowser("PEOPLEPERHOUR");
 
   let page;
   let isNewPage = false;

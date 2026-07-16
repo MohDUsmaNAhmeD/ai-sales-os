@@ -1,12 +1,10 @@
 import { prisma } from "@ai-sales-os/db";
 import {
-  scrapeLinkedInMessages,
+  extractCookiesForPlatform,
+  isBrowserRunning,
   scrapeFacebookMessages,
+  scrapeLinkedInMessages,
   scrapeTwitterMessages,
-  loadLinkedInCookies,
-  saveLinkedInCookies,
-  isLinkedInBrowserRunning,
-  extractLinkedInCookies,
 } from "@ai-sales-os/shared";
 
 interface InboxSyncJobData {
@@ -15,286 +13,104 @@ interface InboxSyncJobData {
   jobId?: string;
 }
 
+type Platform = "LINKEDIN" | "FACEBOOK" | "TWITTER";
+type ScrapedConversation = {
+  conversationId: string;
+  messages: { externalId: string; content: string; senderId: string; senderName?: string; sentAt: string }[];
+};
+
+const scrapers: Record<Platform, (cookies: string) => Promise<ScrapedConversation[]>> = {
+  LINKEDIN: scrapeLinkedInMessages,
+  FACEBOOK: scrapeFacebookMessages,
+  TWITTER: scrapeTwitterMessages,
+};
+
 export async function inboxSyncWorker(data: InboxSyncJobData) {
-  const { profileId, platform } = data;
-
-  console.log(`[InboxSync] Syncing inbox for platform: ${platform || "all"}`);
-
-  const where: Record<string, unknown> = {};
-  if (platform) where.platform = platform;
-
   const connectors = await prisma.connectorState.findMany({
-    where: {
-      ...where,
-      accessToken: { not: null },
-    },
+    where: data.platform ? { platform: data.platform as never } : { platform: { in: Object.keys(scrapers) as never } },
   });
 
-  if (connectors.length === 0) {
-    console.log("[InboxSync] No connectors with cookies found. Connect a platform first.");
-    return;
-  }
+  if (!connectors.length) throw new Error("No messaging connectors are configured.");
 
-  for (const connector of connectors) {
-    try {
-      await syncConnector(connector);
-    } catch (error) {
-      console.error(`[InboxSync] Failed to sync ${connector.platform}:`, error);
-
-      await prisma.connectorState.update({
-        where: { id: connector.id },
-        data: {
-          syncStatus: "error",
-          errorCount: connector.errorCount + 1,
-          lastError: error instanceof Error ? error.message : "Unknown error",
-        },
-      });
-    }
-  }
-}
-
-async function syncConnector(connector: {
-  id: string;
-  platform: string;
-  accessToken: string | null;
-  userId: string;
-}) {
-  console.log(`[InboxSync] Syncing ${connector.platform} for user ${connector.userId}`);
-
-  switch (connector.platform) {
-    case "LINKEDIN":
-      await syncLinkedIn(connector.id, connector.accessToken);
-      break;
-    case "FACEBOOK":
-      await syncFacebook(connector.id, connector.accessToken);
-      break;
-    case "TWITTER":
-      await syncTwitter(connector.id, connector.accessToken);
-      break;
-    default:
-      console.log(`[InboxSync] No sync implementation for ${connector.platform}`);
-  }
-
-  await prisma.connectorState.update({
-    where: { id: connector.id },
-    data: { lastSyncAt: new Date(), syncStatus: "idle" },
-  });
-}
-
-async function syncLinkedIn(connectorId: string, dbCookies: string | null) {
-  console.log("[InboxSync] Syncing LinkedIn messages...");
-
-  let cookies = dbCookies;
-
-  // 1. Try loading from saved file
-  const fileCookies = await loadLinkedInCookies();
-  if (fileCookies) {
-    cookies = fileCookies;
-    console.log("[InboxSync] Using cookies from saved file");
-  }
-
-  // 2. If no cookies, try extracting from running browser via CDP
-  if (!cookies) {
-    const running = await isLinkedInBrowserRunning();
-    if (running) {
+  return Promise.allSettled(
+    connectors.map(async (connector: { id: string; platform: string; accessToken: string | null; userId: string }) => {
+      const platform = connector.platform as Platform;
+      if (!scrapers[platform]) return { platform, count: 0, skipped: true };
       try {
-        console.log("[InboxSync] Browser running, extracting cookies via CDP...");
-        const result = await extractLinkedInCookies();
-        if (result.cookieCount > 0) {
-          cookies = result.cookies;
-          await saveLinkedInCookies(cookies);
-          await prisma.connectorState.update({
-            where: { id: connectorId },
-            data: { accessToken: cookies },
-          });
-          console.log(`[InboxSync] Extracted ${result.cookieCount} cookies from browser`);
-        }
-      } catch (err) {
-        console.warn("[InboxSync] CDP extraction failed:", err);
-      }
-    }
-  }
-
-  if (!cookies) {
-    console.log("[InboxSync] No LinkedIn cookies available. Launch browser and log in first.");
-    return;
-  }
-
-  const conversations = await scrapeLinkedInMessages(cookies);
-  await saveConversationsToDb("LINKEDIN", conversations);
-  console.log(`[InboxSync] Synced ${conversations.length} LinkedIn conversations`);
-}
-
-async function syncFacebook(connectorId: string, cookies: string | null) {
-  console.log("[InboxSync] Syncing Facebook messages...");
-
-  if (!cookies) {
-    // Try to extract cookies from running browser via CDP
-    try {
-      const puppeteer = await import("puppeteer-core");
-      const versionRes = await fetch("http://127.0.0.1:9222/json/version");
-      if (versionRes.ok) {
-        const versionInfo = await versionRes.json();
-        const browser = await puppeteer.connect({
-          browserWSEndpoint: versionInfo.webSocketDebuggerUrl,
-          defaultViewport: null,
-        });
-
-        try {
-          const pages = await browser.pages();
-          const fbPage = pages.find((p: any) => p.url().includes('facebook.com'));
-          if (fbPage) {
-            const client = await fbPage.createCDPSession();
-            const { cookies: allCookies } = await client.send("Network.getAllCookies");
-            const fbCookies = allCookies
-              .filter((c: any) => c.domain.includes("facebook.com"))
-              .map((c: any) => `${c.name}=${c.value}`)
-              .join("; ");
-
-            if (fbCookies) {
-              cookies = fbCookies;
-              await prisma.connectorState.update({
-                where: { id: connectorId },
-                data: { accessToken: cookies },
-              });
-              console.log("[InboxSync] Extracted Facebook cookies from browser via CDP");
-            }
+        let cookies = connector.accessToken;
+        if (await isBrowserRunning(platform)) {
+          const extracted = await extractCookiesForPlatform(platform);
+          if (extracted.cookies) {
+            cookies = extracted.cookies;
+            await prisma.connectorState.update({
+              where: { id: connector.id },
+              data: { accessToken: cookies },
+            });
           }
-        } finally {
-          browser.disconnect();
         }
-      }
-    } catch (err) {
-      console.warn("[InboxSync] Facebook CDP cookie extraction failed:", err);
-    }
-  }
+        if (!cookies) throw new Error(`${platform} is not connected. Launch its browser profile and sign in.`);
 
-  if (!cookies) {
-    console.log("[InboxSync] No Facebook cookies available. Log in to Facebook in the browser first.");
-    return;
-  }
-
-  try {
-    const conversations = await scrapeFacebookMessages(cookies);
-    await saveConversationsToDb("FACEBOOK", conversations);
-    console.log(`[InboxSync] Synced ${conversations.length} Facebook conversations`);
-  } catch (error) {
-    console.error("[InboxSync] Facebook message sync failed:", error);
-    throw error;
-  }
-}
-
-async function syncTwitter(connectorId: string, cookies: string | null) {
-  console.log("[InboxSync] Syncing Twitter/X messages...");
-
-  if (!cookies) {
-    // Try to extract cookies from running browser via CDP
-    try {
-      const puppeteer = await import("puppeteer-core");
-      const versionRes = await fetch("http://127.0.0.1:9222/json/version");
-      if (versionRes.ok) {
-        const versionInfo = await versionRes.json();
-        const browser = await puppeteer.connect({
-          browserWSEndpoint: versionInfo.webSocketDebuggerUrl,
-          defaultViewport: null,
+        const conversations = await scrapers[platform](cookies);
+        await saveConversationsToDb(platform, conversations, connector.userId);
+        await prisma.connectorState.update({
+          where: { id: connector.id },
+          data: { lastSyncAt: new Date(), syncStatus: "idle", lastError: null },
         });
-
-        try {
-          const pages = await browser.pages();
-          const xPage = pages.find((p: any) => p.url().includes('x.com') || p.url().includes('twitter.com'));
-          if (xPage) {
-            const client = await xPage.createCDPSession();
-            const { cookies: allCookies } = await client.send("Network.getAllCookies");
-            const xCookies = allCookies
-              .filter((c: any) => c.domain.includes("x.com") || c.domain.includes("twitter.com"))
-              .map((c: any) => `${c.name}=${c.value}`)
-              .join("; ");
-
-            if (xCookies) {
-              cookies = xCookies;
-              await prisma.connectorState.update({
-                where: { id: connectorId },
-                data: { accessToken: cookies },
-              });
-              console.log("[InboxSync] Extracted Twitter/X cookies from browser via CDP");
-            }
-          }
-        } finally {
-          browser.disconnect();
-        }
+        return { platform, count: conversations.length };
+      } catch (error) {
+        await prisma.connectorState.update({
+          where: { id: connector.id },
+          data: {
+            syncStatus: "error",
+            errorCount: { increment: 1 },
+            lastError: error instanceof Error ? error.message : "Unknown inbox sync error",
+          },
+        });
+        throw error;
       }
-    } catch (err) {
-      console.warn("[InboxSync] Twitter CDP cookie extraction failed:", err);
-    }
-  }
-
-  if (!cookies) {
-    console.log("[InboxSync] No Twitter/X cookies available. Log in to X in the browser first.");
-    return;
-  }
-
-  try {
-    const conversations = await scrapeTwitterMessages(cookies);
-    await saveConversationsToDb("TWITTER", conversations);
-    console.log(`[InboxSync] Synced ${conversations.length} Twitter conversations`);
-  } catch (error) {
-    console.error("[InboxSync] Twitter message sync failed:", error);
-    throw error;
-  }
+    }),
+  );
 }
-
-// ─── Shared DB Helper ──────────────────────────────────────
 
 async function saveConversationsToDb(
-  platform: string,
-  conversations: { conversationId: string; messages: { externalId: string; content: string; senderId: string; senderName?: string; sentAt: string }[] }[]
+  platform: Platform,
+  conversations: ScrapedConversation[],
+  userId: string,
 ) {
-  for (const conv of conversations) {
-    if (!conv.conversationId) continue;
+  for (const item of conversations) {
+    if (!item.conversationId) continue;
+    const conversation =
+      (await prisma.conversation.findFirst({ where: { externalId: item.conversationId, platform } })) ||
+      (await prisma.conversation.create({
+        data: { externalId: item.conversationId, platform, status: "OPEN", userId },
+      }));
 
-    // Find or create conversation
-    let conversation = await prisma.conversation.findFirst({
-      where: { externalId: conv.conversationId, platform: platform as never },
-    });
-
-    if (!conversation) {
-      conversation = await prisma.conversation.create({
-        data: {
-          externalId: conv.conversationId,
-          platform: platform as never,
-          status: "OPEN",
-        },
+    for (const message of item.messages) {
+      if (!message.externalId || !message.content) continue;
+      const exists = await prisma.message.findFirst({
+        where: { externalId: message.externalId, conversationId: conversation.id },
+        select: { id: true },
       });
-    }
-
-    // Sync messages
-    for (const msg of conv.messages) {
-      const existing = await prisma.message.findFirst({
-        where: { externalId: msg.externalId },
-      });
-
-      if (existing) continue;
-
+      if (exists) continue;
       await prisma.message.create({
         data: {
-          externalId: msg.externalId,
+          externalId: message.externalId,
           conversationId: conversation.id,
-          content: msg.content,
+          content: message.content,
           senderType: "CONTACT",
-          senderId: msg.senderId,
-          sentAt: new Date(msg.sentAt),
+          senderId: message.senderId,
+          sentAt: new Date(message.sentAt),
         },
       });
     }
 
-    // Update conversation last message
-    const lastMsg = conv.messages[conv.messages.length - 1];
-    if (lastMsg) {
+    const lastMessage = item.messages.at(-1);
+    if (lastMessage) {
       await prisma.conversation.update({
         where: { id: conversation.id },
         data: {
-          lastMessageAt: new Date(lastMsg.sentAt),
-          lastMessagePreview: lastMsg.content.slice(0, 200),
+          lastMessageAt: new Date(lastMessage.sentAt),
+          lastMessagePreview: lastMessage.content.slice(0, 200),
         },
       });
     }

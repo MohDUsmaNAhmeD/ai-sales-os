@@ -1,153 +1,187 @@
-import { spawn, ChildProcess } from "child_process";
-import { readFile, writeFile, mkdir } from "fs/promises";
-import { join } from "path";
+import { rm } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
+import { Camoufox } from "camoufox-js";
+import type { BrowserContext, Cookie, Page } from "playwright-core";
+export type { Cookie } from "playwright-core";
+
+export const SUPPORTED_PLATFORMS = [
+  "LINKEDIN",
+  "FACEBOOK",
+  "TWITTER",
+  "THREADS",
+  "PEOPLEPERHOUR",
+] as const;
+
+export type BrowserPlatform = (typeof SUPPORTED_PLATFORMS)[number];
 
 export interface CamoufoxConfig {
   profileId: string;
-  profilePath: string;
+  profilePath?: string;
   proxyUrl?: string;
   headless?: boolean;
-  fingerprint?: {
-    userAgent?: string;
-    viewport?: { width: number; height: number };
-    locale?: string;
-    timezone?: string;
-  };
+  startUrl?: string;
 }
 
-export interface BrowserState {
-  cookies: Cookie[];
-  localStorage: Record<string, string>;
-  sessionStorage: Record<string, string>;
-  cache: Record<string, unknown>;
+export interface BrowserHealth {
+  running: boolean;
+  platform: BrowserPlatform;
+  profilePath: string;
+  pages: number;
+  lastActive: string | null;
 }
 
-export interface Cookie {
-  name: string;
-  value: string;
-  domain: string;
-  path: string;
-  expires?: number;
-  httpOnly?: boolean;
-  secure?: boolean;
-  sameSite?: "Strict" | "Lax" | "None";
+const LOGIN_URLS: Record<BrowserPlatform, string> = {
+  LINKEDIN: "https://www.linkedin.com/login",
+  FACEBOOK: "https://www.facebook.com/login",
+  TWITTER: "https://x.com/i/flow/login",
+  THREADS: "https://www.threads.net/login",
+  PEOPLEPERHOUR: "https://www.peopleperhour.com/",
+};
+
+const PLATFORM_HOSTS: Record<BrowserPlatform, string[]> = {
+  LINKEDIN: ["linkedin.com"],
+  FACEBOOK: ["facebook.com"],
+  TWITTER: ["x.com", "twitter.com"],
+  THREADS: ["threads.net", "instagram.com"],
+  PEOPLEPERHOUR: ["peopleperhour.com"],
+};
+
+function normalizePlatform(value: string): BrowserPlatform {
+  const platform = value.toUpperCase() as BrowserPlatform;
+  if (!SUPPORTED_PLATFORMS.includes(platform)) {
+    throw new Error(`Unsupported browser platform: ${value}`);
+  }
+  return platform;
 }
 
 export class CamoufoxManager {
-  private processes: Map<string, ChildProcess> = new Map();
-  private profilesDir: string;
+  private readonly profilesDir: string;
+  private readonly contexts = new Map<BrowserPlatform, BrowserContext>();
+  private readonly lastActive = new Map<BrowserPlatform, string>();
+  private readonly launches = new Map<BrowserPlatform, Promise<BrowserContext>>();
 
-  constructor(profilesDir: string = "./profiles") {
-    this.profilesDir = profilesDir;
+  constructor(profilesDir = process.env.PROFILES_DIR || "./profiles") {
+    this.profilesDir = isAbsolute(profilesDir) ? profilesDir : resolve(process.cwd(), profilesDir);
   }
 
-  async launch(config: CamoufoxConfig): Promise<string> {
-    const { profileId, profilePath, proxyUrl, headless = true, fingerprint } = config;
+  profilePath(platformValue: string): string {
+    const platform = normalizePlatform(platformValue);
+    return join(this.profilesDir, platform.toLowerCase());
+  }
 
-    if (this.processes.has(profileId)) {
-      throw new Error(`Profile ${profileId} is already running`);
+  async launch(config: CamoufoxConfig): Promise<BrowserContext> {
+    const platform = normalizePlatform(config.profileId);
+    const existing = this.contexts.get(platform);
+    if (existing) {
+      this.lastActive.set(platform, new Date().toISOString());
+      return existing;
     }
 
-    await mkdir(profilePath, { recursive: true });
+    const pending = this.launches.get(platform);
+    if (pending) return pending;
 
-    // Load or create browser state
-    const state = await this.loadState(profilePath);
-
-    // Build Camoufox arguments
-    const args = [
-      "--camoufox",
-      `--profile-path=${profilePath}`,
-    ];
-
-    if (headless) args.push("--headless");
-    if (proxyUrl) args.push(`--proxy-server=${proxyUrl}`);
-    if (fingerprint?.userAgent) args.push(`--user-agent=${fingerprint.userAgent}`);
-    if (fingerprint?.locale) args.push(`--lang=${fingerprint.locale}`);
-
-    // In production, this would launch the actual Camoufox binary
-    // For now, simulate the process
-    console.log(`[Camoufox] Launching profile ${profileId} with args:`, args);
-
-    // Store state for later use
-    await this.saveState(profilePath, state);
-
-    return profileId;
-  }
-
-  async close(profileId: string): Promise<void> {
-    const process = this.processes.get(profileId);
-    if (process) {
-      process.kill();
-      this.processes.delete(profileId);
-    }
-  }
-
-  async resetProfile(profileId: string, profilePath: string): Promise<void> {
-    await this.close(profileId);
-
-    // Clear all browser state
-    const emptyState: BrowserState = {
-      cookies: [],
-      localStorage: {},
-      sessionStorage: {},
-      cache: {},
-    };
-
-    await this.saveState(profilePath, emptyState);
-    console.log(`[Camoufox] Profile ${profileId} reset`);
-  }
-
-  async getCookies(profileId: string): Promise<Cookie[]> {
-    const state = await this.loadState(this.getProfilePath(profileId));
-    return state.cookies;
-  }
-
-  async setCookies(profileId: string, cookies: Cookie[]): Promise<void> {
-    const state = await this.loadState(this.getProfilePath(profileId));
-    state.cookies = cookies;
-    await this.saveState(this.getProfilePath(profileId), state);
-  }
-
-  async getLocalStorage(profileId: string): Promise<Record<string, string>> {
-    const state = await this.loadState(this.getProfilePath(profileId));
-    return state.localStorage;
-  }
-
-  async setLocalStorage(profileId: string, data: Record<string, string>): Promise<void> {
-    const state = await this.loadState(this.getProfilePath(profileId));
-    state.localStorage = { ...state.localStorage, ...data };
-    await this.saveState(this.getProfilePath(profileId), state);
-  }
-
-  async healthCheck(profileId: string): Promise<boolean> {
-    const process = this.processes.get(profileId);
-    return process !== undefined && !process.killed;
-  }
-
-  private getProfilePath(profileId: string): string {
-    return join(this.profilesDir, profileId);
-  }
-
-  private async loadState(profilePath: string): Promise<BrowserState> {
+    const launch = this.createContext(platform, config);
+    this.launches.set(platform, launch);
     try {
-      const data = await readFile(join(profilePath, "browser-state.json"), "utf-8");
-      return JSON.parse(data);
-    } catch {
-      return {
-        cookies: [],
-        localStorage: {},
-        sessionStorage: {},
-        cache: {},
-      };
+      return await launch;
+    } finally {
+      this.launches.delete(platform);
     }
   }
 
-  private async saveState(profilePath: string, state: BrowserState): Promise<void> {
-    await mkdir(profilePath, { recursive: true });
-    await writeFile(join(profilePath, "browser-state.json"), JSON.stringify(state, null, 2));
+  private async createContext(platform: BrowserPlatform, config: CamoufoxConfig): Promise<BrowserContext> {
+    const profilePath = config.profilePath || this.profilePath(platform);
+    const context = await Camoufox({
+      user_data_dir: profilePath,
+      headless: config.headless ?? process.env.CAMOUFOX_HEADLESS === "true",
+      proxy: config.proxyUrl,
+      humanize: true,
+      enable_cache: true,
+      os: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux",
+      locale: "en-US",
+      window: [1440, 900],
+    });
+
+    this.contexts.set(platform, context);
+    this.lastActive.set(platform, new Date().toISOString());
+    context.on("close", () => this.contexts.delete(platform));
+
+    const pages = context.pages();
+    const page = pages[0] || (await context.newPage());
+    if (page.url() === "about:blank") {
+      await page.goto(config.startUrl || LOGIN_URLS[platform], { waitUntil: "domcontentloaded" });
+    }
+    return context;
+  }
+
+  async getContext(platformValue: string, autoLaunch = false): Promise<BrowserContext> {
+    const platform = normalizePlatform(platformValue);
+    const context = this.contexts.get(platform);
+    if (context) return context;
+    if (autoLaunch) return this.launch({ profileId: platform });
+    throw new Error(`${platform} browser is not running. Launch it in Settings and sign in first.`);
+  }
+
+  async getPage(platformValue: string, autoLaunch = false): Promise<Page> {
+    const platform = normalizePlatform(platformValue);
+    const context = await this.getContext(platform, autoLaunch);
+    const hosts = PLATFORM_HOSTS[platform];
+    const page = context.pages().find((candidate) => hosts.some((host) => candidate.url().includes(host)));
+    this.lastActive.set(platform, new Date().toISOString());
+    return page || context.pages()[0] || context.newPage();
+  }
+
+  async close(platformValue: string): Promise<void> {
+    const platform = normalizePlatform(platformValue);
+    const context = this.contexts.get(platform);
+    if (!context) return;
+    this.contexts.delete(platform);
+    await context.close();
+  }
+
+  async closeAll(): Promise<void> {
+    await Promise.allSettled([...this.contexts.keys()].map((platform) => this.close(platform)));
+  }
+
+  async resetProfile(platformValue: string): Promise<void> {
+    const platform = normalizePlatform(platformValue);
+    await this.close(platform);
+    await rm(this.profilePath(platform), { recursive: true, force: true });
+    this.lastActive.delete(platform);
+  }
+
+  async healthCheck(platformValue: string): Promise<BrowserHealth> {
+    const platform = normalizePlatform(platformValue);
+    const context = this.contexts.get(platform);
+    return {
+      running: Boolean(context),
+      platform,
+      profilePath: this.profilePath(platform),
+      pages: context?.pages().length ?? 0,
+      lastActive: this.lastActive.get(platform) ?? null,
+    };
+  }
+
+  async getCookies(platformValue: string): Promise<Cookie[]> {
+    const context = await this.getContext(platformValue);
+    return context.cookies();
+  }
+
+  async cookieHeader(platformValue: string): Promise<string> {
+    const cookies = await this.getCookies(platformValue);
+    return cookies.map(({ name, value }) => `${name}=${value}`).join("; ");
+  }
+
+  async setCookies(platformValue: string, cookies: Cookie[]): Promise<void> {
+    const context = await this.getContext(platformValue, true);
+    await context.addCookies(cookies);
   }
 }
 
-export function createCamoufoxManager(profilesDir?: string): CamoufoxManager {
-  return new CamoufoxManager(profilesDir);
+export const camoufox = new CamoufoxManager();
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    void camoufox.closeAll().finally(() => process.exit(0));
+  });
 }
